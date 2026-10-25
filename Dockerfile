@@ -9,7 +9,7 @@ ARG VERSION_FEATURE_SET="v1"
 ARG CARGO_BUILD_PROFILE=release
 
 RUN apt-get update \
-    && apt-get install -y libpq-dev libssl-dev pkg-config protobuf-compiler
+    && apt-get install -y libpq-dev libssl-dev pkg-config protobuf-compiler lld
 
 # Copying codebase from current dir to /router dir
 # and creating a fresh build
