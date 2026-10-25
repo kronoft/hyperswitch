@@ -1,12 +1,59 @@
 //! An installment provider, asked from the eligibility call for the installment counts a card may
 //! take, each with its total. Off unless `[installment_provider]` is configured.
 
-use api_models::payment_methods::PaymentMethodListInstallmentOption;
-use common_utils::{id_type, pii, types::MinorUnit};
+use api_models::payment_methods::{
+    PaymentMethodListInstallmentAmountDetails, PaymentMethodListInstallmentOption,
+    PaymentMethodListInstallmentPlan,
+};
+use common_types::payments::{BillingFrequency, InstallmentInterestRate};
+use common_utils::{
+    id_type, pii,
+    request::{Method, RequestBuilder, RequestContent},
+    types::MinorUnit,
+};
+use external_services::http_client;
 use hyperswitch_interfaces::types::Proxy;
-use hyperswitch_masking::Secret;
+use hyperswitch_masking::{Mask, PeekInterface, Secret};
+use router_env::logger;
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 
 use crate::{configs::settings::InstallmentProviderConfig, routes::SessionState};
+
+/// How long the eligibility call waits for the provider.
+const TIMEOUT_SECS: u64 = 2;
+
+/// How long a quote is kept for confirm: as long as the provider holds it.
+const KEEP_SECS: i64 = 30 * 60;
+
+/// What the provider is sent: never the card number.
+#[derive(Debug, serde::Serialize)]
+struct QuoteRequest {
+    hyperswitch_merchant_id: String,
+    bin: Secret<String>,
+    amount: i64,
+    basket: Vec<BasketLine>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BasketLine {
+    category: String,
+    amount: i64,
+}
+
+/// The order's lines that name a category, each with its amount for all its quantity.
+fn basket(order_details: Option<&[pii::SecretSerdeValue]>) -> Vec<BasketLine> {
+    order_details
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|line| {
+            let line = line.peek();
+            Some(BasketLine {
+                category: line["category"].as_str()?.to_string(),
+                amount: line["amount"].as_i64()? * line["quantity"].as_i64().unwrap_or(1),
+            })
+        })
+        .collect()
+}
 
 /// The provider's quote, kept for confirm to check the chosen count against.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -29,33 +76,155 @@ pub struct QuotedCount {
 /// Asks the provider for the counts the card may take for the payment. `None` when the provider
 /// is off, the BIN is not 8 digits, or the provider refuses, fails or does not answer in time.
 pub async fn quote(
-    _proxy: &Proxy,
-    _provider: Option<&InstallmentProviderConfig>,
-    _payment_id: &id_type::PaymentId,
-    _hyperswitch_merchant_id: &id_type::MerchantId,
-    _card_bin: &cards::CardBin,
-    _amount: MinorUnit,
-    _order_details: Option<&[pii::SecretSerdeValue]>,
+    proxy: &Proxy,
+    provider: Option<&InstallmentProviderConfig>,
+    payment_id: &id_type::PaymentId,
+    hyperswitch_merchant_id: &id_type::MerchantId,
+    card_bin: &cards::CardBin,
+    amount: MinorUnit,
+    order_details: Option<&[pii::SecretSerdeValue]>,
 ) -> Option<Quote> {
-    None
+    let provider = provider?;
+    let bin = card_bin.get_eight_digit_bin()?;
+    let body = QuoteRequest {
+        hyperswitch_merchant_id: hyperswitch_merchant_id.get_string_repr().to_string(),
+        bin: Secret::new(bin.to_string()),
+        amount: amount.get_amount_as_i64(),
+        basket: basket(order_details),
+    };
+    let request = RequestBuilder::new()
+        .method(Method::Post)
+        .url(provider.url.as_str())
+        .headers(vec![
+            (
+                http::header::AUTHORIZATION.to_string(),
+                format!("Bearer {}", provider.token.peek()).into_masked(),
+            ),
+            (
+                http::header::CONTENT_TYPE.to_string(),
+                "application/json".to_string().into(),
+            ),
+        ])
+        .set_body(RequestContent::Json(Box::new(body)))
+        .build();
+    let payment_id = payment_id.get_string_repr();
+    let response = match http_client::send_request(proxy, request, Some(TIMEOUT_SECS)).await {
+        Ok(response) => response,
+        Err(_) => {
+            logger::warn!(payment_id, "installment provider: no answer");
+            return None;
+        }
+    };
+    let status = response.status().as_u16();
+    let quote = match status {
+        201 => response.json::<Quote>().await.ok(),
+        _ => None,
+    };
+    logger::info!(
+        payment_id,
+        status,
+        quoted = quote.is_some(),
+        "installment provider: answered"
+    );
+    quote
 }
 
 /// The quote's counts as the eligibility answer gives them.
 pub fn options(
-    _quote: &Quote,
-    _currency: common_enums::Currency,
+    quote: &Quote,
+    currency: common_enums::Currency,
 ) -> Option<Vec<PaymentMethodListInstallmentOption>> {
-    None
+    let amount = Decimal::from(quote.amount);
+    (quote.amount > 0).then_some(())?;
+    let available_plans = quote
+        .counts
+        .iter()
+        .map(|quoted| {
+            // The interest is shown as a rate; the total is what the customer pays.
+            let rate = (Decimal::from(quoted.total) - amount) * Decimal::ONE_HUNDRED / amount;
+            Some(PaymentMethodListInstallmentPlan {
+                number_of_installments: quoted.count,
+                billing_frequency: BillingFrequency::Month,
+                interest_rate: InstallmentInterestRate::try_from(rate.round_dp(2).to_f64()?)
+                    .ok()?,
+                amount_details: PaymentMethodListInstallmentAmountDetails {
+                    amount_per_installment: MinorUnit::new(quoted.monthly)
+                        .to_major_unit_as_f64(currency)
+                        .ok()?,
+                    total_amount: MinorUnit::new(quoted.total)
+                        .to_major_unit_as_f64(currency)
+                        .ok()?,
+                },
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(vec![PaymentMethodListInstallmentOption {
+        payment_method: common_enums::PaymentMethod::Card,
+        available_plans,
+    }])
+}
+
+/// Where a payment's quote is kept.
+pub fn key(merchant_id: &id_type::MerchantId, payment_id: &id_type::PaymentId) -> String {
+    format!(
+        "installment_quote:{}:{}",
+        merchant_id.get_string_repr(),
+        payment_id.get_string_repr()
+    )
 }
 
 /// Keeps the quote on the payment for confirm, as long as the provider holds it.
-pub async fn keep(
-    _state: &SessionState,
-    _merchant_id: &id_type::MerchantId,
-    _payment_id: &id_type::PaymentId,
-    _quote: &Quote,
+async fn keep(
+    state: &SessionState,
+    merchant_id: &id_type::MerchantId,
+    payment_id: &id_type::PaymentId,
+    quote: &Quote,
 ) -> bool {
-    false
+    let kept = match state.store.get_redis_conn() {
+        Ok(redis) => redis
+            .serialize_and_set_key_with_expiry(
+                &key(merchant_id, payment_id).into(),
+                quote,
+                KEEP_SECS,
+            )
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    if !kept {
+        logger::warn!(
+            payment_id = payment_id.get_string_repr(),
+            "installment provider: quote not kept"
+        );
+    }
+    kept
+}
+
+/// The eligibility call's installment options: the provider's quote for the card, kept on the
+/// payment for confirm. `None` leaves the payment to go as a single payment.
+pub async fn eligibility(
+    state: &SessionState,
+    merchant_id: &id_type::MerchantId,
+    payment_id: &id_type::PaymentId,
+    card_bin: &cards::CardBin,
+    amount: MinorUnit,
+    currency: Option<common_enums::Currency>,
+    order_details: Option<&[pii::SecretSerdeValue]>,
+) -> Option<Vec<PaymentMethodListInstallmentOption>> {
+    let quote = quote(
+        &state.conf.proxy,
+        state.conf.installment_provider.as_ref(),
+        payment_id,
+        merchant_id,
+        card_bin,
+        amount,
+        order_details,
+    )
+    .await?;
+    let options = options(&quote, currency?)?;
+    keep(state, merchant_id, payment_id, &quote)
+        .await
+        .then_some(options)
 }
 
 #[cfg(test)]

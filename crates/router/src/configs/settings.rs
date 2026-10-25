@@ -742,7 +742,7 @@ pub struct InstallmentProviderConfig {
     /// The provider's quote URL
     pub url: url::Url,
     /// A file holding the provider's bearer token, read at startup
-    pub token_file: std::path::PathBuf,
+    pub token_file: PathBuf,
     #[serde(skip)]
     pub token: Secret<String>,
 }
