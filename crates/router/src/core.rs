@@ -33,6 +33,7 @@ pub mod files;
 pub mod fraud_check;
 pub mod gsm;
 pub mod health_check;
+pub mod installment_provider;
 pub mod mandate;
 pub mod merchant_connector_webhook_management;
 pub mod metrics;

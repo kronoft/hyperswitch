@@ -45,6 +45,11 @@ impl CardBin {
         self.0.chars().take(6).collect()
     }
 
+    /// The BIN as given, when it is the card's first 8 digits
+    pub fn get_eight_digit_bin(&self) -> Option<&str> {
+        (self.0.len() == 8).then_some(self.0.as_str())
+    }
+
     /// Every blocklist-relevant prefix derivable from this BIN: lengths
     /// [`MIN_CARD_BIN_LENGTH`] up to the number of digits actually provided
     /// (capped at [`MAX_CARD_BIN_LENGTH`]).

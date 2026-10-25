@@ -13701,6 +13701,10 @@ pub struct PaymentsEligibilityResponse {
     /// Present when Offer Engine eligibility is evaluated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_details: Option<EligibilityOfferDetails>,
+    /// The installment counts the card may take, each with its total. Present when an
+    /// installment provider is configured and quoted the card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installment_options: Option<Vec<payment_methods::PaymentMethodListInstallmentOption>>,
 }
 
 /// Payable amount details returned during eligibility, before and after the

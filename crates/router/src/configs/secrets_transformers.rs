@@ -4,7 +4,7 @@ use hyperswitch_interfaces::secrets_interface::{
     secret_state::{RawSecret, SecretStateContainer, SecuredSecret},
     SecretManagementInterface, SecretsManagementError,
 };
-use hyperswitch_masking::PeekInterface;
+use hyperswitch_masking::{PeekInterface, Secret};
 
 use crate::settings::{self, Settings};
 
@@ -644,6 +644,16 @@ pub(crate) async fn fetch_raw_secrets(
         .await;
 
     #[allow(clippy::expect_used)]
+    let installment_provider =
+        conf.installment_provider
+            .map(|provider| settings::InstallmentProviderConfig {
+                token: std::fs::read_to_string(&provider.token_file)
+                    .map(|token| Secret::new(token.trim().to_string()))
+                    .expect("Failed to read the installment provider's token_file"),
+                ..provider
+            });
+
+    #[allow(clippy::expect_used)]
     let sage = settings::SageSettings::convert_to_raw_secret(conf.sage, secret_management_client)
         .await
         .expect("Failed to decrypt sage configs");
@@ -809,6 +819,7 @@ pub(crate) async fn fetch_raw_secrets(
         micro_services: conf.micro_services,
         superposition,
         offer_engine,
+        installment_provider,
         comparison_service: conf.comparison_service,
         authentication_service_enabled_connectors: conf.authentication_service_enabled_connectors,
         save_payment_method_on_session: conf.save_payment_method_on_session,
