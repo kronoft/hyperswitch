@@ -195,6 +195,7 @@ pub struct Settings<S: SecretState> {
     pub enhancement: Option<HashMap<String, String>>,
     pub superposition: SecretStateContainer<SuperpositionClientConfig, S>,
     pub offer_engine: Option<SecretStateContainer<OfferEngineConfig, S>>,
+    pub installment_provider: Option<InstallmentProviderConfig>,
     pub proxy_status_mapping: ProxyStatusMapping,
     pub trace_header: TraceHeaderConfig,
     pub internal_services: InternalServicesConfig,
@@ -733,6 +734,17 @@ impl OfferEngineConfig {
             },
         )
     }
+}
+
+/// The installment provider asked from the eligibility call; absent means off.
+#[derive(Debug, Deserialize, Clone)]
+pub struct InstallmentProviderConfig {
+    /// The provider's quote URL
+    pub url: url::Url,
+    /// A file holding the provider's bearer token, read at startup
+    pub token_file: std::path::PathBuf,
+    #[serde(skip)]
+    pub token: Secret<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

@@ -1575,6 +1575,12 @@ base_url = "https://offer-engine.example.com/" # Base URL of the Offer Engine se
 api_key = ""                                  # API key for the `application` credential source; omit when credentials are at the merchant level
 merchant_id = ""                              # Offer Engine merchant id for the `application` credential source; omit when credentials are at the merchant level
 
+# An installment provider asked from the eligibility call for the counts a card may take, with
+# each count's total; omit the section entirely to keep it off
+[installment_provider]
+url = "https://installments.example.com/quote" # The provider's quote URL
+token_file = "/run/secrets/installment_provider" # A file holding the provider's bearer token
+
 # Credentials and call settings for the Account Updater flow; omit the section entirely to keep it off
 [account_updater.juspay]
 base_url = "https://account-updater.example.com/" # Account Updater base URL

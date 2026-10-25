@@ -15144,6 +15144,7 @@ pub async fn payments_submit_eligibility(
             surcharge_details,
             amount_details,
             offer_details,
+            installment_options: None,
         },
     ))
 }
