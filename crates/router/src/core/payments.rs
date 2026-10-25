@@ -143,6 +143,7 @@ use crate::{
             DimensionsWithProcessorAndProviderMerchantIdAndProfileId,
         },
         errors::{self, CustomResult, RouterResponse, RouterResult},
+        installment_provider,
         payment_methods::{cards, network_tokenization, transformers as pm_transformers},
         payments::helpers::{
             get_applepay_metadata, is_applepay_predecrypted_flow_supported,
@@ -15095,6 +15096,19 @@ pub async fn payments_submit_eligibility(
         .payment_method_type
         .to_string()
         .to_uppercase();
+    // The installment provider, when configured, is asked with the card's BIN only.
+    let installment_card_bin = state.conf.installment_provider.as_ref().and_then(|_| {
+        match payment_eligibility_data.payment_method_data.as_ref()? {
+            domain::EligibilityPaymentMethodData::CardBin(bin) => Some(bin.card_bin.clone()),
+            _ => None,
+        }
+    });
+    let installment_order_details = installment_card_bin.as_ref().and(
+        payment_eligibility_data
+            .payment_intent
+            .order_details
+            .clone(),
+    );
 
     let eligibility_handler =
         EligibilityHandler::new(state, platform, payment_eligibility_data, business_profile);
@@ -15114,6 +15128,30 @@ pub async fn payments_submit_eligibility(
             ))
             .await?
         }
+    };
+
+    let installment_options = match installment_card_bin {
+        Some(card_bin)
+            if !matches!(
+                sdk_next_action.next_action,
+                api_models::payments::NextActionCall::Deny { .. }
+            ) =>
+        {
+            Box::pin(installment_provider::eligibility(
+                &state_for_surcharge,
+                platform_for_surcharge
+                    .get_processor()
+                    .get_account()
+                    .get_id(),
+                &payment_id,
+                &card_bin,
+                offer_order_amount,
+                offer_currency,
+                installment_order_details.as_deref(),
+            ))
+            .await
+        }
+        _ => None,
     };
 
     // Offer Engine eligibility: resolve `/list` and, when an offer is selected,
@@ -15144,7 +15182,7 @@ pub async fn payments_submit_eligibility(
             surcharge_details,
             amount_details,
             offer_details,
-            installment_options: None,
+            installment_options,
         },
     ))
 }

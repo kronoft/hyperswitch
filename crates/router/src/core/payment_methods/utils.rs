@@ -958,10 +958,15 @@ pub async fn get_sdk_next_action_for_payment_method_list(
         )
         .await;
 
-    if should_perform_eligibility {
+    // An installment provider answers in the eligibility call.
+    let installment_provider = state.conf.installment_provider.is_some();
+
+    if should_perform_eligibility || installment_provider {
         api_models::payments::SdkNextAction {
             next_action: api_models::payments::NextActionCall::EligibilityCheck,
-            should_block_confirm: Some(has_surcharge_processor || offers_enabled),
+            should_block_confirm: Some(
+                has_surcharge_processor || offers_enabled || installment_provider,
+            ),
         }
     } else {
         api_models::payments::SdkNextAction {
