@@ -422,6 +422,7 @@ mod tests {
             // never the card number.
             .and(body_json(json!({
                 "hyperswitch_merchant_id": "merchant_1",
+                "payment_id": "pay_1",
                 "bin": "40000150",
                 "amount": 100000,
                 "basket": [{"category": "electronics", "amount": 80000}],
