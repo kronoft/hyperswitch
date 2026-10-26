@@ -722,14 +722,25 @@ fn build_metadata(
         }
     }
 
-    Some(Secret::new(metadata_json))
+    Some(Secret::new(with_installments(
+        metadata_json,
+        item.router_data.request.installment_details.as_ref(),
+    )))
 }
 
 /// The metadata with the customer's installment count, when above 1 and the merchant set none.
 fn with_installments(
-    metadata: serde_json::Value,
-    _installments: Option<&common_types::payments::InstallmentData>,
+    mut metadata: serde_json::Value,
+    installments: Option<&common_types::payments::InstallmentData>,
 ) -> serde_json::Value {
+    let count = installments
+        .map(|installments| installments.number_of_installments.get())
+        .filter(|count| *count > 1);
+    if let (Some(count), Some(metadata)) = (count, metadata.as_object_mut()) {
+        metadata
+            .entry("installments")
+            .or_insert_with(|| json!(count));
+    }
     metadata
 }
 
