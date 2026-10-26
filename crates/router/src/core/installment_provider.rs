@@ -242,8 +242,8 @@ pub async fn eligibility(
 }
 
 /// The payment method list's flag for the SDK's BIN eligibility call: on only with a provider.
-pub fn card_bin_eligibility(_provider: Option<&InstallmentProviderConfig>) -> Option<bool> {
-    None
+pub fn card_bin_eligibility(provider: Option<&InstallmentProviderConfig>) -> Option<bool> {
+    provider.map(|_| true)
 }
 
 /// What confirm does with the customer's installment choice.
