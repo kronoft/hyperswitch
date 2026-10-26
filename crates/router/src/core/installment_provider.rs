@@ -12,14 +12,24 @@ use common_utils::{
     request::{Method, RequestBuilder, RequestContent},
     types::MinorUnit,
 };
+use error_stack::{report, ResultExt};
 use external_services::http_client;
-use hyperswitch_domain_models::payments::payment_attempt::NetAmount;
+use hyperswitch_domain_models::payments::{payment_attempt::NetAmount, SurchargeMode};
 use hyperswitch_interfaces::types::Proxy;
 use hyperswitch_masking::{Mask, PeekInterface, Secret};
+use redis_interface::errors::RedisError;
 use router_env::logger;
 use rust_decimal::{prelude::ToPrimitive, Decimal};
 
-use crate::{configs::settings::InstallmentProviderConfig, routes::SessionState};
+use crate::{
+    configs::settings::InstallmentProviderConfig,
+    core::{
+        errors::{self, RouterResult},
+        payments::PaymentData,
+    },
+    routes::SessionState,
+    types::domain,
+};
 
 /// How long the eligibility call waits for the provider.
 const TIMEOUT_SECS: u64 = 2;
@@ -243,14 +253,97 @@ pub enum Confirm {
 /// Holds the customer's choice to the payment's kept quote, setting the interest the connector
 /// is charged; an `Err` is the reason confirm is refused before the connector.
 pub fn settle(
-    _quote: Option<&Quote>,
-    _merchant_options: bool,
-    _choice: Option<&mut InstallmentData>,
-    _card_bin: Option<&str>,
-    _internal_surcharge: bool,
-    _net_amount: &mut NetAmount,
+    quote: Option<&Quote>,
+    merchant_options: bool,
+    choice: Option<&mut InstallmentData>,
+    card_bin: Option<&str>,
+    internal_surcharge: bool,
+    net_amount: &mut NetAmount,
 ) -> Result<Confirm, String> {
-    Ok(Confirm::Upstream)
+    let choice = match choice {
+        Some(choice) if choice.number_of_installments.get() > 1 => choice,
+        choice => {
+            if let Some(choice) = choice {
+                choice.installment_interest = None;
+            }
+            net_amount.set_installment_interest(None);
+            return Ok(Confirm::Single);
+        }
+    };
+    let Some(quote) = quote else {
+        return match merchant_options {
+            true => Ok(Confirm::Upstream),
+            false => Err("Installment options are not configured for this payment".to_string()),
+        };
+    };
+    if card_bin != Some(quote.bin.peek().as_str()) {
+        return Err(
+            "The installments were quoted for another card, or the card's BIN can't be read"
+                .to_string(),
+        );
+    }
+    let count = choice.number_of_installments;
+    let quoted = quote
+        .counts
+        .iter()
+        .find(|quoted| quoted.count == count)
+        .ok_or_else(|| format!("No installment plan found for {count} installments"))?;
+    net_amount.set_installment_interest(None);
+    if internal_surcharge || net_amount.get_total_amount() != MinorUnit::new(quote.amount) {
+        return Err(
+            "The amount is not the one the installments were quoted for: offers and \
+             surcharges can't be combined with provider installments"
+                .to_string(),
+        );
+    }
+    let interest = Some(MinorUnit::new(quoted.total - quote.amount));
+    net_amount.set_installment_interest(interest);
+    choice.installment_interest = interest;
+    Ok(Confirm::Quoted)
+}
+
+/// Confirm's installments with the provider configured: the payment's kept quote, if any, settled
+/// against the customer's choice. `Upstream` leaves the merchant's own options to upstream.
+pub async fn populate<F: Clone>(
+    state: &SessionState,
+    payment_data: &mut PaymentData<F>,
+    profile: &domain::Profile,
+) -> RouterResult<Confirm> {
+    let attempt = &payment_data.payment_attempt;
+    let quote = match state
+        .store
+        .get_redis_conn()
+        .change_context(errors::ApiErrorResponse::InternalServerError)?
+        .get_and_deserialize_key::<Quote>(
+            &key(&attempt.merchant_id, &attempt.payment_id).into(),
+            "Quote",
+        )
+        .await
+    {
+        Ok(quote) => Some(quote),
+        Err(err) if err.current_context() == &RedisError::NotFound => None,
+        Err(err) => {
+            return Err(err.change_context(errors::ApiErrorResponse::InternalServerError))
+                .attach_printable("Failed to read the installment quote")
+        }
+    };
+    let card_bin = payment_data
+        .payment_method_data
+        .as_ref()
+        .and_then(|data| data.get_card_extended_bin());
+    let internal_surcharge =
+        payment_data.payment_intent.get_surcharge_mode(profile) == Some(SurchargeMode::Internal);
+    let merchant_options = payment_data.payment_intent.installment_options.is_some();
+    let attempt = &mut payment_data.payment_attempt;
+    settle(
+        quote.as_ref(),
+        merchant_options,
+        attempt.installment_data.as_mut(),
+        card_bin.as_deref(),
+        internal_surcharge,
+        &mut attempt.net_amount,
+    )
+    .map_err(|message| report!(errors::ApiErrorResponse::InvalidRequestData { message }))
 }
 
 #[cfg(test)]

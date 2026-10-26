@@ -39,6 +39,7 @@ use crate::{
         card_testing_guard::utils as card_testing_guard_utils,
         configs::dimension_state,
         errors::{self, CustomResult, RouterResult, StorageErrorExt},
+        installment_provider,
         mandate::helpers as m_helpers,
         metrics, offer_engine,
         payment_methods::{transformers as pm_transformers, vault},
@@ -1534,13 +1535,21 @@ impl<F: Clone + Send + Sync> Domain<F, api::PaymentsRequest, PaymentData<F>> for
     #[instrument(skip_all)]
     async fn populate_payment_data<'a>(
         &'a self,
-        _state: &SessionState,
+        state: &SessionState,
         payment_data: &mut PaymentData<F>,
         _processor: &domain::Processor,
         business_profile: &domain::Profile,
         connector_data: &api::ConnectorData,
     ) -> CustomResult<(), errors::ApiErrorResponse> {
-        populate_installment_details(payment_data)?;
+        let installments = match state.conf.installment_provider {
+            Some(_) => {
+                installment_provider::populate(state, payment_data, business_profile).await?
+            }
+            None => installment_provider::Confirm::Upstream,
+        };
+        if installments == installment_provider::Confirm::Upstream {
+            populate_installment_details(payment_data)?;
+        }
         payment_data.payment_attempt.request_extended_authorization = payment_data
             .payment_intent
             .get_request_extended_authorization_bool_if_connector_supports(
