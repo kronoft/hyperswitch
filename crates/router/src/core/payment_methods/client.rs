@@ -804,6 +804,9 @@ pub async fn list_payment_methods_client(
             customer_payment_methods: customer_payment_methods_filtered,
             sdk_next_action,
             intent_data,
+            card_bin_eligibility: crate::core::installment_provider::card_bin_eligibility(
+                state.conf.installment_provider.as_ref(),
+            ),
         },
     ))
 }

@@ -241,6 +241,11 @@ pub async fn eligibility(
         .then_some(options)
 }
 
+/// The payment method list's flag for the SDK's BIN eligibility call: on only with a provider.
+pub fn card_bin_eligibility(_provider: Option<&InstallmentProviderConfig>) -> Option<bool> {
+    None
+}
+
 /// What confirm does with the customer's installment choice.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Confirm {
@@ -541,6 +546,70 @@ mod tests {
             None,
             None,
         )
+    }
+
+    /// The SDK's payment method list as the router answers it, with the provider's flag.
+    fn list(
+        card_bin_eligibility: Option<bool>,
+    ) -> api_models::payment_methods::ClientPaymentMethodsListResponse {
+        api_models::payment_methods::ClientPaymentMethodsListResponse {
+            payment_methods_enabled: vec![],
+            customer_payment_methods: vec![],
+            sdk_next_action: api_models::payments::SdkNextAction {
+                next_action: api_models::payments::NextActionCall::Confirm,
+                should_block_confirm: None,
+            },
+            intent_data: api_models::payment_methods::PaymentMethodListIntentData {
+                payment_id: id_type::PaymentId::try_from(std::borrow::Cow::Borrowed("pay_1"))
+                    .unwrap(),
+                status: common_enums::IntentStatus::RequiresPaymentMethod,
+                amount: MinorUnit::new(100000),
+                currency: None,
+                client_secret: None,
+                description: None,
+                customer_id: None,
+                return_url: None,
+                setup_future_usage: None,
+                billing: None,
+                shipping: None,
+                email: None,
+                metadata: None,
+                order_details: None,
+                created: None,
+                expires_on: None,
+                profile_id: None,
+                merchant_order_reference_id: None,
+                attempt_count: 1,
+                installment_options: None,
+                capture_method: None,
+                merchant_name: None,
+                mandate_payment: None,
+                payment_type: None,
+                request_external_three_ds_authentication: None,
+                is_tax_calculation_enabled: None,
+                is_guest_customer: None,
+            },
+            card_bin_eligibility,
+        }
+    }
+
+    #[test]
+    fn the_list_turns_the_bin_call_on_only_with_the_provider() {
+        let listed = |provider: Option<&InstallmentProviderConfig>| {
+            serde_json::to_value(list(card_bin_eligibility(provider))).unwrap()
+        };
+        // Unconfigured: upstream's answer, without the key.
+        let off = listed(None);
+        assert!(off.get("card_bin_eligibility").is_none(), "{off}");
+        let configured = InstallmentProviderConfig {
+            url: "http://provider.test/quote".parse().unwrap(),
+            token_file: Default::default(),
+            token: Secret::new("provider-token".to_string()),
+        };
+        assert_eq!(
+            listed(Some(&configured)).get("card_bin_eligibility"),
+            Some(&json!(true))
+        );
     }
 
     fn choice(count: u8) -> InstallmentData {
