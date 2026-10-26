@@ -725,6 +725,14 @@ fn build_metadata(
     Some(Secret::new(metadata_json))
 }
 
+/// The metadata with the customer's installment count, when above 1 and the merchant set none.
+fn with_installments(
+    metadata: serde_json::Value,
+    _installments: Option<&common_types::payments::InstallmentData>,
+) -> serde_json::Value {
+    metadata
+}
+
 /// Pad a 2-digit "YY" expiry year to 4-digit "20YY", pass-through if already 4-digit.
 ///
 /// `CardData::get_expiry_year_4_digit` (in `crates/hyperswitch_connectors/src/utils.rs`)
@@ -2802,5 +2810,47 @@ fn convert_to_additional_payment_method_connector_response(
                 auth_code,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_types::payments::{BillingFrequency, InstallmentData};
+
+    use super::*;
+
+    fn chosen(count: u8) -> InstallmentData {
+        InstallmentData {
+            number_of_installments: count.try_into().unwrap_or(std::num::NonZeroU8::MIN),
+            billing_frequency: BillingFrequency::Month,
+            installment_interest: None,
+        }
+    }
+
+    #[test]
+    fn a_chosen_count_above_one_reaches_the_metadata() {
+        assert_eq!(
+            with_installments(json!({"udf5": "partner"}), Some(&chosen(3))),
+            json!({"udf5": "partner", "installments": 3})
+        );
+        assert_eq!(
+            with_installments(json!({}), Some(&chosen(6))),
+            json!({"installments": 6})
+        );
+    }
+
+    #[test]
+    fn a_single_payment_or_the_merchant_s_own_count_is_left_alone() {
+        let metadata = json!({"order": "o_1", "installments": "2"});
+        for installments in [None, Some(chosen(1)), Some(chosen(3))] {
+            assert_eq!(
+                with_installments(metadata.clone(), installments.as_ref()),
+                metadata
+            );
+        }
+        assert_eq!(
+            with_installments(json!({"order": "o_1"}), Some(&chosen(1))),
+            json!({"order": "o_1"})
+        );
     }
 }
