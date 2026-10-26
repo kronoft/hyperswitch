@@ -41,6 +41,7 @@ const KEEP_SECS: i64 = 30 * 60;
 #[derive(Debug, serde::Serialize)]
 struct QuoteRequest {
     hyperswitch_merchant_id: String,
+    payment_id: String,
     bin: Secret<String>,
     amount: i64,
     basket: Vec<BasketLine>,
@@ -100,6 +101,7 @@ pub async fn quote(
     let bin = card_bin.get_eight_digit_bin()?;
     let body = QuoteRequest {
         hyperswitch_merchant_id: hyperswitch_merchant_id.get_string_repr().to_string(),
+        payment_id: payment_id.get_string_repr().to_string(),
         bin: Secret::new(bin.to_string()),
         amount: amount.get_amount_as_i64(),
         basket: basket(order_details),
