@@ -3286,6 +3286,11 @@ pub struct ClientPaymentMethodsListResponse {
 
     /// Payment intent context data
     pub intent_data: PaymentMethodListIntentData,
+
+    /// Whether the SDK asks the eligibility call with the card's first 8 digits, for an
+    /// installment provider's options; absent when no provider is configured
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_bin_eligibility: Option<bool>,
 }
 
 /// The combined payment-method list, or the error that prevented it being built.
