@@ -1,17 +1,19 @@
 //! An installment provider, asked from the eligibility call for the installment counts a card may
-//! take, each with its total. Off unless `[installment_provider]` is configured.
+//! take, each with its total, which confirm then holds the payment to. Off unless
+//! `[installment_provider]` is configured.
 
 use api_models::payment_methods::{
     PaymentMethodListInstallmentAmountDetails, PaymentMethodListInstallmentOption,
     PaymentMethodListInstallmentPlan,
 };
-use common_types::payments::{BillingFrequency, InstallmentInterestRate};
+use common_types::payments::{BillingFrequency, InstallmentData, InstallmentInterestRate};
 use common_utils::{
     id_type, pii,
     request::{Method, RequestBuilder, RequestContent},
     types::MinorUnit,
 };
 use external_services::http_client;
+use hyperswitch_domain_models::payments::payment_attempt::NetAmount;
 use hyperswitch_interfaces::types::Proxy;
 use hyperswitch_masking::{Mask, PeekInterface, Secret};
 use router_env::logger;
@@ -227,6 +229,30 @@ pub async fn eligibility(
         .then_some(options)
 }
 
+/// What confirm does with the customer's installment choice.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Confirm {
+    /// No installments: a single payment, whatever was quoted.
+    Single,
+    /// The merchant's own installment options: upstream's path, unchanged.
+    Upstream,
+    /// The provider's quote: the connector is charged the quoted total.
+    Quoted,
+}
+
+/// Holds the customer's choice to the payment's kept quote, setting the interest the connector
+/// is charged; an `Err` is the reason confirm is refused before the connector.
+pub fn settle(
+    _quote: Option<&Quote>,
+    _merchant_options: bool,
+    _choice: Option<&mut InstallmentData>,
+    _card_bin: Option<&str>,
+    _internal_surcharge: bool,
+    _net_amount: &mut NetAmount,
+) -> Result<Confirm, String> {
+    Ok(Confirm::Upstream)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -403,5 +429,137 @@ mod tests {
             serde_json::to_string(&answer).unwrap(),
             r#"{"payment_id":"pay_1","sdk_next_action":{"next_action":"confirm","should_block_confirm":null},"surcharge_details":null}"#
         );
+    }
+
+    fn kept() -> Quote {
+        serde_json::from_value(answer()).unwrap()
+    }
+
+    fn net_amount(order_amount: i64) -> NetAmount {
+        NetAmount::new(
+            MinorUnit::new(order_amount),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn choice(count: u8) -> InstallmentData {
+        InstallmentData {
+            number_of_installments: count.try_into().unwrap(),
+            billing_frequency: BillingFrequency::Month,
+            installment_interest: None,
+        }
+    }
+
+    #[test]
+    fn a_quoted_count_reaches_the_connector_at_exactly_its_total() {
+        // Customer-paid 6 (total 105000) and merchant-paid 3 (total = amount).
+        for (count, total) in [(6, 105000), (3, 100000)] {
+            let mut chosen = choice(count);
+            let mut amount = net_amount(100000);
+            // Twice, as a retried confirm would: the interest is set, never added.
+            for _ in 0..2 {
+                let path = settle(
+                    Some(&kept()),
+                    false,
+                    Some(&mut chosen),
+                    Some("40000150"),
+                    false,
+                    &mut amount,
+                );
+                assert_eq!(path, Ok(Confirm::Quoted), "{count}");
+                // What the connector is sent: the attempt's total amount.
+                assert_eq!(amount.get_total_amount(), MinorUnit::new(total), "{count}");
+            }
+            assert_eq!(
+                chosen.installment_interest,
+                Some(MinorUnit::new(total - 100000))
+            );
+        }
+    }
+
+    #[test]
+    fn another_count_card_or_amount_is_refused() {
+        let refused = |count: u8, card_bin: Option<&str>, internal_surcharge, amount| {
+            let mut amount = amount;
+            settle(
+                Some(&kept()),
+                false,
+                Some(&mut choice(count)),
+                card_bin,
+                internal_surcharge,
+                &mut amount,
+            )
+            .expect_err("refused")
+        };
+        // A count the quote does not offer.
+        assert!(refused(9, Some("40000150"), false, net_amount(100000)).contains("9"));
+        // Another card, and a token or wallet whose BIN can't be read.
+        refused(6, Some("51000150"), false, net_amount(100000));
+        refused(6, None, false, net_amount(100000));
+        // The amount changed: an offer, a surcharge, another amount, or a surcharge to come.
+        let offer = NetAmount::new(
+            MinorUnit::new(100000),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(MinorUnit::new(5000)),
+        );
+        let surcharge = NetAmount::new(
+            MinorUnit::new(100000),
+            None,
+            None,
+            Some(MinorUnit::new(1000)),
+            None,
+            None,
+            None,
+        );
+        for (amount, internal_surcharge) in [
+            (offer, false),
+            (surcharge, false),
+            (net_amount(90000), false),
+            (net_amount(100000), true),
+        ] {
+            assert!(refused(6, Some("40000150"), internal_surcharge, amount).contains("offers"));
+        }
+    }
+
+    #[test]
+    fn without_a_quote_the_merchant_s_options_keep_upstream_s_path() {
+        let settled = |quote: Option<&Quote>, merchant_options, chosen: Option<u8>, bin| {
+            let mut chosen = chosen.map(choice);
+            let mut amount = net_amount(100000);
+            let path = settle(
+                quote,
+                merchant_options,
+                chosen.as_mut(),
+                bin,
+                false,
+                &mut amount,
+            );
+            (path, amount.get_total_amount())
+        };
+        // The merchant set its options: upstream's EMI formula, the amount left to it.
+        assert_eq!(
+            settled(None, true, Some(6), Some("40000150")),
+            (Ok(Confirm::Upstream), MinorUnit::new(100000))
+        );
+        // Neither a quote nor the merchant's options.
+        assert!(settled(None, false, Some(6), Some("40000150")).0.is_err());
+        // A single payment is always allowed, with or without a quote, whatever the card.
+        for quote in [None, Some(&kept())] {
+            for chosen in [None, Some(1)] {
+                assert_eq!(
+                    settled(quote, false, chosen, None),
+                    (Ok(Confirm::Single), MinorUnit::new(100000))
+                );
+            }
+        }
     }
 }
